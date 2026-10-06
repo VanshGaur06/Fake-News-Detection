@@ -1,0 +1,13 @@
+__pycache__/
+.mpl-cache/
+pytest-cache-files-*/
+*.py[cod]
+.venv/
+venv/
+.env
+models/*.joblib
+outputs/metrics/*.json
+outputs/figures/*.png
+data/*.csv
+!.gitkeep
+.streamlit/secrets.toml
