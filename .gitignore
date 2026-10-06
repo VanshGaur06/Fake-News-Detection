@@ -1,6 +1,7 @@
 __pycache__/
 .mpl-cache/
 pytest-cache-files-*/
+tests/.pytest-tmp/
 *.py[cod]
 .venv/
 venv/
@@ -9,5 +10,7 @@ models/*.joblib
 outputs/metrics/*.json
 outputs/figures/*.png
 data/*.csv
+/data/liar/*.tsv
+/data/liar/*.part
 !.gitkeep
 .streamlit/secrets.toml

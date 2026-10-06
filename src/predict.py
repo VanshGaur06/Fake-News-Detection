@@ -1,4 +1,4 @@
-"""Prediction helpers for saved TruthLens artifacts."""
+"""Load saved LIAR artifacts and predict a single political statement."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -13,34 +13,37 @@ class ModelNotTrainedError(FileNotFoundError):
 
 
 def load_artifacts(model_dir: Path = MODEL_DIR) -> dict:
-    required = [model_dir / "final_model.joblib", model_dir / "tfidf_vectorizer.joblib", model_dir / "metadata.joblib"]
-    missing = [str(path) for path in required if not path.exists()]
+    paths = {"model": model_dir / "final_model.joblib",
+             "vectorizer": model_dir / "tfidf_vectorizer.joblib",
+             "explainer": model_dir / "explanation_model.joblib",
+             "metadata": model_dir / "metadata.joblib"}
+    missing = [str(path) for path in paths.values() if not path.exists()]
     if missing:
-        raise ModelNotTrainedError("Model not trained yet. Run: python src/train.py")
-    return {"model": joblib.load(required[0]), "vectorizer": joblib.load(required[1]),
-            "metadata": joblib.load(required[2])}
+        raise ModelNotTrainedError("TruthLens model isn't trained yet. Run: python src/train.py")
+    return {name: joblib.load(path) for name, path in paths.items()}
 
 
-def predict_article(article: str, artifacts: dict) -> dict:
-    if not article or not article.strip():
-        raise ValueError("Paste an article with at least a few words to analyze.")
-    from src.preprocessing import clean_text
-    cleaned = clean_text(article)
-    if len(cleaned.split()) < 5:
-        raise ValueError("Please enter a little more text (at least five meaningful words).")
-    vector = artifacts["vectorizer"].transform([cleaned])
+def predict_statement(statement: str, artifacts: dict) -> dict:
+    if not statement or not statement.strip():
+        raise ValueError("Please enter a meaningful claim.")
+    from src.preprocessing import clean_text, binary_label, LIAR_LABELS
+    cleaned = clean_text(statement)
+    if len(cleaned.split()) < 3:
+        raise ValueError("Please enter a little more text (at least three meaningful words).")
     model = artifacts["model"]
-    label = str(model.predict(vector)[0])
-    if hasattr(model, "predict_proba"):
-        probabilities = model.predict_proba(vector)[0]
-        confidence = float(probabilities[list(model.classes_).index(label)])
-    elif hasattr(model, "decision_function"):
-        # Model is calibrated during training; this branch is only a defensive fallback.
-        raise RuntimeError("Saved classifier does not provide calibrated probabilities.")
-    else:
-        raise RuntimeError("Saved classifier does not provide confidence estimates.")
+    predicted = str(model.predict([cleaned])[0])
+    if not hasattr(model, "predict_proba"):
+        raise RuntimeError("The saved model does not provide calibrated class probabilities.")
+    raw_probabilities = model.predict_proba([cleaned])[0]
+    probabilities = {label: float(raw_probabilities[list(model.classes_).index(label)])
+                     for label in LIAR_LABELS}
+    explanation = _explanation(cleaned, predicted, artifacts)
+    return {"label": predicted, "binary_interpretation": binary_label(predicted),
+            "confidence": probabilities[predicted], "probabilities": probabilities,
+            "model_name": artifacts["metadata"]["model_name"], "word_count": len(cleaned.split()),
+            "explanation": explanation}
+
+
+def _explanation(cleaned: str, predicted: str, artifacts: dict) -> dict:
     from src.explain import explain_prediction
-    explainer = artifacts["metadata"].get("explainer_model", model)
-    explanation = explain_prediction(cleaned, artifacts["vectorizer"], explainer)
-    return {"label": label, "confidence": confidence, "model_name": artifacts["metadata"]["model_name"],
-            "word_count": len(article.split()), "explanation": explanation}
+    return explain_prediction(cleaned, artifacts["vectorizer"], artifacts["explainer"], predicted)

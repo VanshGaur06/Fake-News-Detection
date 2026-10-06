@@ -1,5 +1,5 @@
-# Dataset location
+# LIAR dataset setup
 
-Place your real labeled dataset at `data/dataset.csv`.
+Dataset source: <https://github.com/tfs4/liar_dataset>
 
-Required fields: `label` with `Fake`/`Real`, `FAKE`/`REAL`, or `0`/`1`; and `text`, `title`, or both. `subject` and `date` are optional. The training script does not download or fabricate data.
+Run `python src/download_dataset.py` to download only `train.tsv`, `valid.tsv`, and `test.tsv` into `data/liar/`. The downloader validates the 14-column TSV format and expected LIAR labels. The raw files are ignored by Git. To set them up manually, put the three original split files in `data/liar/`.
