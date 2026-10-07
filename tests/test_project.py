@@ -1,144 +1,71 @@
 from pathlib import Path
-
 import numpy as np
-import pandas as pd
 import pytest
-from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import StratifiedKFold
 
-from src.dataset import LIAR_COLUMNS, load_splits
-from src.evaluate import classification_metrics
-from src.explain import explain_prediction
-from src.features import make_vectorizer
-from src.predict import ModelNotTrainedError, load_artifacts, predict_statement
-from src.preprocessing import BINARY_INTERPRETATION, LIAR_LABELS, binary_label, clean_text, normalize_liar_label
-from src.train import make_pipeline, tune_on_validation
-from sklearn.naive_bayes import MultinomialNB
+from src.dataset import DATA_PATH, LABELS, load_dataset, stratified_splits
+from src.predict import load_artifacts, predict_article
 
 
-@pytest.mark.parametrize("raw", LIAR_LABELS)
-def test_liar_labels_normalize_and_binary_map(raw):
-    assert normalize_liar_label(raw.upper()) == raw
-    assert binary_label(raw) == BINARY_INTERPRETATION[raw]
+@pytest.fixture(scope="session")
+def dataset():
+    return load_dataset(DATA_PATH)
 
 
-def test_invalid_label_is_rejected():
-    assert normalize_liar_label("unverified") is None
+@pytest.fixture(scope="session")
+def heldout(dataset):
+    frame, _ = dataset
+    return stratified_splits(frame)
 
 
-def test_cleaning_preserves_negation_and_numbers():
-    assert clean_text("<b>NOT true!</b> 25% https://example.com") == "not true 25%"
+def test_welfake_csv_columns_rows_and_binary_mapping(dataset):
+    frame, summary = dataset
+    assert summary["source_rows"] == 72134
+    assert set(("title", "text", "article", "label")).issubset(frame.columns)
+    assert set(frame["label"].unique()) == set(LABELS)
+    assert summary["class_distribution"]["FAKE"] > 0
+    assert summary["class_distribution"]["REAL"] > 0
+    assert frame["article"].str.strip().ne("").all()
 
 
-class MemoryPath:
-    """Tiny fake path for exercising split schemas without making training data."""
-    def __init__(self, name="root", exists=True):
-        self.name, self._exists = name, exists
-
-    def __truediv__(self, child):
-        return MemoryPath(child, self._exists)
-
-    def exists(self):
-        return self._exists
-
-    def __str__(self):
-        return self.name
-
-
-def test_official_tsv_loading_and_duplicate_removal(monkeypatch):
-    rows = []
-    for index, label in enumerate(LIAR_LABELS):
-        row = [f"id-{index}", label, f"statement {label} sample {index}", "economy, taxes",
-               "speaker", "job", "state", "party", "0", "1", "2", "3", "4", "context"]
-        rows.append(row)
-    files = {"train.tsv": rows + [rows[0]], "valid.tsv": [[*row[:2], row[2] + " val", *row[3:]] for row in rows],
-             "test.tsv": [[*row[:2], row[2] + " test", *row[3:]] for row in rows]}
-    frames = {name: pd.DataFrame(split_rows, columns=LIAR_COLUMNS) for name, split_rows in files.items()}
-    monkeypatch.setattr("src.dataset.pd.read_csv", lambda path, **kwargs: frames[path.name].copy())
-    splits, duplicates = load_splits(MemoryPath())
-    assert {name: len(frame) for name, frame in splits.items()} == {"train": 6, "validation": 6, "test": 6}
-    assert duplicates["training_duplicates_removed"] == 1
-    assert set(splits["train"].label) == set(LIAR_LABELS)
+def test_stratified_splits_are_disjoint_and_approximately_80_10_10(heldout):
+    train, validation, test = (heldout[key] for key in ("train", "validation", "test"))
+    total = len(train) + len(validation) + len(test)
+    assert abs(len(train) / total - 0.8) < 0.002
+    assert abs(len(validation) / total - 0.1) < 0.002
+    assert abs(len(test) / total - 0.1) < 0.002
+    train_texts = set(train.article.str.casefold())
+    validation_texts = set(validation.article.str.casefold())
+    test_texts = set(test.article.str.casefold())
+    assert train_texts.isdisjoint(validation_texts)
+    assert train_texts.isdisjoint(test_texts)
+    assert validation_texts.isdisjoint(test_texts)
+    for split in (train, validation, test):
+        assert set(split.label.unique()) == set(LABELS)
 
 
-def test_missing_dataset_has_readable_error(monkeypatch):
-    monkeypatch.setattr(MemoryPath, "exists", lambda self: False)
-    with pytest.raises(FileNotFoundError, match="LIAR"):
-        load_splits(MemoryPath())
+def test_saved_model_is_welfake_logistic_regression():
+    artifacts = load_artifacts()
+    assert list(artifacts["model"].classes_) == ["FAKE", "REAL"]
+    assert artifacts["metadata"]["dataset"] == "WELFake"
+    assert artifacts["metadata"]["model_name"] == "Logistic Regression"
+    assert artifacts["metadata"]["leakage_controls"]["vectorizer_fit_rows"] == artifacts["metadata"]["split_sizes"]["train"]
+    assert artifacts["metadata"]["leakage_controls"]["validation_and_test_used_for_fit"] is False
 
 
-def make_training_examples():
-    texts, labels = [], []
-    terms = ["pants fire burning", "false claim denied", "barely true uncertain", "half true partial", "mostly true accurate", "true verified"]
-    for label, phrase in zip(LIAR_LABELS, terms):
-        for number in range(8):
-            texts.append(f"{phrase} policy statement report evidence example {number}")
-            labels.append(label)
-    return np.asarray(texts), np.asarray(labels)
+@pytest.mark.parametrize("label", LABELS)
+def test_inference_on_real_heldout_article_per_class(label, heldout):
+    artifacts = load_artifacts()
+    sample = heldout["test"].loc[heldout["test"].label.eq(label)].iloc[0]
+    result = predict_article(sample.title, sample.text, artifacts)
+    assert result["label"] in LABELS
+    assert set(result["probabilities"]) == set(LABELS)
+    assert np.isclose(sum(result["probabilities"].values()), 1.0)
+    assert 0 <= result["fake_probability"] <= 1
+    assert 0 <= result["real_probability"] <= 1
+    assert result["model_name"] == "Logistic Regression"
+    assert result["explanation"]["available"]
 
 
-def test_tfidf_and_multiclass_training_and_probabilities():
-    texts, labels = make_training_examples()
-    model = make_pipeline(MultinomialNB()).fit(texts, labels)
-    probabilities = model.predict_proba(["verified true statement report evidence"])[0]
-    assert list(model.classes_) == sorted(LIAR_LABELS)
-    assert np.isclose(probabilities.sum(), 1.0)
-    assert make_vectorizer().ngram_range == (1, 2)
-
-
-def test_validation_grid_search_fits_and_selects_parameters():
-    texts, labels = make_training_examples()
-    model, params = tune_on_validation("test", make_pipeline(MultinomialNB()),
-        {"classifier__alpha": [0.5, 1.0]}, texts[:36], labels[:36], texts[36:], labels[36:])
-    assert model.predict(texts[36:]).shape[0] == len(texts[36:])
-    assert params["classifier__alpha"] in {0.5, 1.0}
-
-
-def test_six_class_metrics_and_binary_metrics_are_separate():
-    labels = list(LIAR_LABELS) * 2
-    metrics = classification_metrics(labels, labels)
-    assert metrics["macro_f1"] == 1.0
-    assert len(metrics["confusion_matrix"]) == 6
-    assert metrics["binary_interpretation"]["macro_f1"] == 1.0
-    assert len(metrics["binary_interpretation"]["confusion_matrix"]) == 2
-
-
-def test_multiclass_linear_explanation_has_support_and_opposition():
-    texts, labels = make_training_examples()
-    vectorizer = make_vectorizer().fit(texts)
-    matrix = vectorizer.transform(texts)
-    model = LogisticRegression(max_iter=1000).fit(matrix, labels)
-    result = explain_prediction(texts[0], vectorizer, model, "pants-fire")
-    assert result["available"]
-    assert result["competitor"] in LIAR_LABELS
-    assert all(item["direction"] in {"supports", "pushes away"} for item in result["features"])
-
-
-def test_empty_and_short_claim_inputs():
-    with pytest.raises(ValueError):
-        predict_statement("", {})
-    with pytest.raises(ValueError):
-        predict_statement("two words", {})
-
-
-def test_six_class_prediction_probability_and_binary_result():
-    class FixedProbabilityModel:
-        classes_ = np.asarray(LIAR_LABELS)
-        def predict(self, texts):
-            return np.asarray(["half-true"])
-        def predict_proba(self, texts):
-            return np.asarray([[.03, .04, .08, .62, .15, .08]])
-
-    vectorizer = make_vectorizer().set_params(max_df=1.0).fit(["the senator supported a new public policy"] * 4)
-    result = predict_statement("The senator supported the new public policy", {
-        "model": FixedProbabilityModel(), "vectorizer": vectorizer,
-        "explainer": object(), "metadata": {"model_name": "Unit test"}})
-    assert result["label"] == "half-true"
-    assert result["binary_interpretation"] == "REAL / HIGHER TRUTHFULNESS"
-    assert result["confidence"] == pytest.approx(.62)
-    assert sum(result["probabilities"].values()) == pytest.approx(1.0)
-
-
-def test_missing_model_artifacts():
-    with pytest.raises(ModelNotTrainedError):
-        load_artifacts(Path(".absent-model-artifacts"))
+def test_missing_artifacts_are_not_replaced_by_old_liar_files(tmp_path):
+    with pytest.raises(FileNotFoundError, match="WELFake"):
+        load_artifacts(tmp_path)

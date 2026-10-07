@@ -1,46 +1,23 @@
-"""Deterministic statement cleaning shared by training and inference."""
+"""Text normalization shared by WELFake training and article inference."""
 from __future__ import annotations
 
 import html
 import re
 from typing import Any
-
 import pandas as pd
 
-URL_PATTERN = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
-HTML_PATTERN = re.compile(r"<[^>]+>")
-TOKEN_PATTERN = re.compile(r"[a-z]+(?:'[a-z]+)?|\d+(?:\.\d+)?%?")
+URL_PATTERN = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
+HTML_PATTERN = re.compile(r"<[^>]*>")
+SPACE_PATTERN = re.compile(r"\s+")
+BINARY_LABELS = ("FAKE", "REAL")
 
 
 def clean_text(value: Any) -> str:
-    """Normalize markup/URLs and punctuation while retaining stopwords and numbers."""
+    """Lowercase article text and strip markup, URLs, control noise, and excess space."""
     if value is None or pd.isna(value):
         return ""
     text = html.unescape(str(value)).lower()
     text = URL_PATTERN.sub(" ", text)
     text = HTML_PATTERN.sub(" ", text)
-    return " ".join(TOKEN_PATTERN.findall(text))
-
-
-def normalize_liar_label(value: Any) -> str | None:
-    """Normalize a valid LIAR six-class label; return None for invalid values."""
-    if value is None or pd.isna(value):
-        return None
-    label = str(value).strip().lower().replace("_", "-").replace(" ", "-")
-    return label if label in LIAR_LABELS else None
-
-
-LIAR_LABELS = ("pants-fire", "false", "barely-true", "half-true", "mostly-true", "true")
-BINARY_INTERPRETATION = {
-    "pants-fire": "FAKE / LOW TRUTHFULNESS",
-    "false": "FAKE / LOW TRUTHFULNESS",
-    "barely-true": "FAKE / LOW TRUTHFULNESS",
-    "half-true": "REAL / HIGHER TRUTHFULNESS",
-    "mostly-true": "REAL / HIGHER TRUTHFULNESS",
-    "true": "REAL / HIGHER TRUTHFULNESS",
-}
-
-
-def binary_label(liar_label: str) -> str:
-    """Project-level grouping, not a claim that half-true statements are factual."""
-    return "FAKE / LOW TRUTHFULNESS" if liar_label in LIAR_LABELS[:3] else "REAL / HIGHER TRUTHFULNESS"
+    text = text.replace("\x00", " ")
+    return SPACE_PATTERN.sub(" ", text).strip()

@@ -1,60 +1,79 @@
-"""LIAR dataset split loading and leakage-safe duplicate handling."""
+"""WELFake binary article loading, deduplication, and stratified splitting."""
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import pandas as pd
-
-from src.preprocessing import LIAR_LABELS, clean_text, normalize_liar_label
+from sklearn.model_selection import train_test_split
 
 ROOT = Path(__file__).resolve().parents[1]
-DATA_DIR = ROOT / "data" / "liar"
-LIAR_COLUMNS = ["id", "label", "statement", "subjects", "speaker", "speaker_job",
-                "state_info", "party_affiliation", "barely_true_count", "false_count",
-                "half_true_count", "mostly_true_count", "pants_fire_count", "context"]
-SPLIT_FILES = {"train": "train.tsv", "validation": "valid.tsv", "test": "test.tsv"}
+DATA_PATH = ROOT / "data" / "WELFake_Dataset.csv"
+RANDOM_STATE = 42
+LABEL_MAP = {0: "FAKE", 1: "REAL"}  # WELFake's published encoding.
+LABELS = ("FAKE", "REAL")
 
 
-def load_split(path: Path, split_name: str) -> pd.DataFrame:
+def _normalize_duplicate_key(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text).casefold()).strip()
+
+
+def load_dataset(path: Path = DATA_PATH) -> tuple[pd.DataFrame, dict]:
+    """Load WELFake title/body text and binary labels; remove empty/duplicate articles."""
     if not path.exists():
-        raise FileNotFoundError(f"LIAR {split_name} split missing: {path}. Run python src/download_dataset.py")
+        raise FileNotFoundError(f"WELFake dataset missing: {path}")
     try:
-        frame = pd.read_csv(path, sep="\t", header=None, names=LIAR_COLUMNS, dtype={"id": str},
-                            keep_default_na=False, quoting=3, on_bad_lines="error")
+        frame = pd.read_csv(path, low_memory=False)
     except Exception as exc:
-        raise ValueError(f"Could not parse {split_name} TSV: {exc}") from exc
-    if frame.shape[1] != 14 or frame.empty:
-        raise ValueError(f"{path} must contain non-empty rows with exactly 14 tab-separated LIAR columns.")
-    frame["label"] = frame["label"].map(normalize_liar_label)
-    invalid = int(frame["label"].isna().sum())
-    if invalid:
-        raise ValueError(f"{path} contains {invalid} missing or unknown labels; expected the six original LIAR labels.")
-    frame["cleaned_statement"] = frame["statement"].map(clean_text)
-    frame = frame[frame["cleaned_statement"].str.strip().ne("")].copy()
-    frame["word_count"] = frame["cleaned_statement"].str.split().str.len()
-    return frame.reset_index(drop=True)
+        raise ValueError(f"Could not read WELFake CSV: {exc}") from exc
+    source_rows = len(frame)
+    frame.columns = [str(column).strip().lower() for column in frame.columns]
+    required = {"title", "text", "label"}
+    if not required.issubset(frame.columns):
+        raise ValueError(f"WELFake CSV must contain title, text, and label columns; found {list(frame.columns)}")
+    frame["label"] = pd.to_numeric(frame["label"], errors="coerce")
+    invalid = frame["label"].isna() | ~frame["label"].isin(LABEL_MAP)
+    if invalid.any():
+        raise ValueError(f"WELFake CSV has {int(invalid.sum())} invalid labels; expected 0=FAKE and 1=REAL.")
+    frame["label"] = frame["label"].astype(int).map(LABEL_MAP)
+    frame["title"] = frame["title"].fillna("").astype(str).str.strip()
+    frame["text"] = frame["text"].fillna("").astype(str).str.strip()
+    frame["article"] = (frame["title"] + " " + frame["text"]).str.replace(r"\s+", " ", regex=True).str.strip()
+    before_empty = len(frame)
+    frame = frame[frame["article"].ne("")].copy()
+    empty_removed = before_empty - len(frame)
+    frame["duplicate_key"] = frame["article"].map(_normalize_duplicate_key)
+
+    # Drop duplicate-content groups with conflicting labels rather than allowing
+    # the same article to leak across splits with contradictory targets.
+    label_counts = frame.groupby("duplicate_key")["label"].nunique()
+    conflicting_keys = set(label_counts[label_counts > 1].index)
+    conflicting_rows = int(frame["duplicate_key"].isin(conflicting_keys).sum())
+    frame = frame[~frame["duplicate_key"].isin(conflicting_keys)].copy()
+    before_dedupe = len(frame)
+    frame = frame.drop_duplicates("duplicate_key", keep="first").copy()
+    duplicate_rows_removed = before_dedupe - len(frame)
+    if frame.empty or set(frame["label"].unique()) != set(LABELS):
+        raise ValueError("WELFake must contain usable articles for both FAKE and REAL after cleaning.")
+    frame = frame.reset_index(drop=True)
+    summary = {
+        "dataset": "WELFake", "source_rows": int(source_rows),
+        "total_samples": int(len(frame)), "empty_articles_removed": int(empty_removed),
+        "duplicate_articles_removed": int(duplicate_rows_removed),
+        "conflicting_duplicate_rows_removed": int(conflicting_rows),
+        "class_distribution": {label: int(count) for label, count in frame["label"].value_counts().reindex(LABELS, fill_value=0).items()},
+    }
+    return frame[["title", "text", "article", "label"]], summary
 
 
-def load_splits(data_dir: Path = DATA_DIR) -> tuple[dict[str, pd.DataFrame], dict[str, int]]:
-    splits = {name: load_split(data_dir / filename, name) for name, filename in SPLIT_FILES.items()}
-    # Reserve evaluation statements: remove any matching claim from training, and any
-    # test-overlapping claim from validation so the test set cannot influence tuning.
-    test_texts = set(splits["test"]["cleaned_statement"])
-    validation_texts = set(splits["validation"]["cleaned_statement"])
-    before_train = len(splits["train"])
-    splits["train"] = splits["train"].drop_duplicates("cleaned_statement", keep="first")
-    splits["train"] = splits["train"][~splits["train"]["cleaned_statement"].isin(test_texts | validation_texts)]
-    before_validation = len(splits["validation"])
-    splits["validation"] = splits["validation"].drop_duplicates("cleaned_statement", keep="first")
-    splits["validation"] = splits["validation"][~splits["validation"]["cleaned_statement"].isin(test_texts)]
-    before_test = len(splits["test"])
-    splits["test"] = splits["test"].drop_duplicates("cleaned_statement", keep="first")
-    if not splits["train"].shape[0] or not splits["validation"].shape[0] or not splits["test"].shape[0]:
-        raise ValueError("LIAR splits must remain non-empty after exact duplicate statements are removed.")
-    for name, frame in splits.items():
-        missing_classes = sorted(set(LIAR_LABELS) - set(frame["label"]))
-        if missing_classes:
-            raise ValueError(f"The {name} split is missing classes: {', '.join(missing_classes)}")
-    duplicate_summary = {"training_duplicates_removed": before_train - len(splits["train"]),
-                         "validation_duplicates_removed": before_validation - len(splits["validation"]),
-                         "test_duplicates_removed": before_test - len(splits["test"])}
-    return splits, duplicate_summary
+def stratified_splits(frame: pd.DataFrame, random_state: int = RANDOM_STATE) -> dict[str, pd.DataFrame]:
+    """Create fixed 80/10/10 splits with class ratios preserved in each split."""
+    train, remainder = train_test_split(frame, test_size=0.2, random_state=random_state,
+        shuffle=True, stratify=frame["label"])
+    validation, test = train_test_split(remainder, test_size=0.5, random_state=random_state,
+        shuffle=True, stratify=remainder["label"])
+    splits = {"train": train.reset_index(drop=True), "validation": validation.reset_index(drop=True),
+              "test": test.reset_index(drop=True)}
+    keys = {name: set(part["article"].map(_normalize_duplicate_key)) for name, part in splits.items()}
+    if (keys["train"] & keys["validation"] or keys["train"] & keys["test"] or keys["validation"] & keys["test"]):
+        raise RuntimeError("Article text leakage detected between dataset splits.")
+    return splits

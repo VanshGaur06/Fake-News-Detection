@@ -1,4 +1,4 @@
-"""TruthLens: an evidence-aware interface for the LIAR text classifier."""
+"""TruthLens: a binary fake-news classifier trained on WELFake articles."""
 from __future__ import annotations
 
 import html
@@ -12,13 +12,13 @@ import pandas as pd
 import seaborn as sns
 import streamlit as st
 
-from src.dataset import DATA_DIR, SPLIT_FILES, load_splits
-from src.predict import ModelNotTrainedError, load_artifacts, predict_statement
+from src.dataset import DATA_PATH, load_dataset as load_welfake, LABELS as DATA_LABELS, stratified_splits
+from src.predict import ModelNotTrainedError, load_artifacts, predict_article
 
 ROOT = Path(__file__).resolve().parent
 METRICS_PATH = ROOT / "outputs" / "metrics" / "evaluation.json"
-LABELS = ["pants-fire", "false", "barely-true", "half-true", "mostly-true", "true"]
-COLORS = ["#8B5CF6", "#8B5CF6", "#22D3EE", "#22D3EE", "#34D399", "#34D399"]
+LABELS = ["FAKE", "REAL"]
+COLORS = ["#F43F5E", "#34D399"]
 SAMPLE_CLAIMS = [
     "The city council approved a new public transit route connecting the north and south districts.",
     "The state budget allocates additional funding to public schools next year.",
@@ -72,8 +72,8 @@ def load_metrics() -> dict:
 
 
 @st.cache_data
-def load_dataset() -> tuple[dict, dict]:
-    return load_splits(DATA_DIR)
+def load_dataset():
+    return load_welfake(DATA_PATH)
 
 
 @st.cache_resource
@@ -86,20 +86,16 @@ TEST = METRICS.get("test_metrics", {})
 VALIDATION = METRICS.get("validation_metrics", {})
 MODEL_NAME = METRICS.get("model_name", "Saved classifier")
 ARTIFACT_PATHS = {
-    "model": ROOT / "models" / "final_model.joblib",
-    "vectorizer": ROOT / "models" / "tfidf_vectorizer.joblib",
-    "explainer": ROOT / "models" / "explanation_model.joblib",
-    "metadata": ROOT / "models" / "metadata.joblib",
+    "model": ROOT / "models" / "fake_news_model.joblib",
+    "vectorizer": ROOT / "models" / "fake_news_vectorizer.joblib",
+    "metadata": ROOT / "models" / "fake_news_metadata.json",
 }
 ARTIFACT_FILES_PRESENT = all(path.is_file() for path in ARTIFACT_PATHS.values())
 try:
     LOADED_ARTIFACTS = get_artifacts() if ARTIFACT_FILES_PRESENT else None
 except Exception:
     LOADED_ARTIFACTS = None
-try:
-    LOADED_DATASET = load_dataset() if all((DATA_DIR / name).is_file() for name in SPLIT_FILES.values()) else None
-except Exception:
-    LOADED_DATASET = None
+LOADED_DATASET = DATA_PATH.is_file()
 MODEL_READY = LOADED_ARTIFACTS is not None
 VECTORIZER_READY = MODEL_READY and "vectorizer" in LOADED_ARTIFACTS
 DATASET_READY = LOADED_DATASET is not None
@@ -109,7 +105,7 @@ PAGES = {
     "Analyze": ("✦", "Check a claim", "WORKSPACE"),
     "Explainability": ("⌁", "Why the model decided", "WORKSPACE"),
     "Model Lab": ("◫", "Performance & metrics", "WORKSPACE"),
-    "Dataset": ("▤", "LIAR benchmark", "DATA & SCIENCE"),
+    "Dataset": ("▤", "WELFake articles", "DATA & SCIENCE"),
     "Methodology": ("⌘", "How TruthLens works", "DATA & SCIENCE"),
 }
 
@@ -117,6 +113,8 @@ if "page" not in st.session_state:
     st.session_state.page = "Home"
 if "claim" not in st.session_state:
     st.session_state.claim = ""
+if "article_title" not in st.session_state:
+    st.session_state.article_title = ""
 if "history" not in st.session_state:
     st.session_state.history = []
 
@@ -130,6 +128,7 @@ def go(page: str) -> None:
 
 
 def set_sample(text: str) -> None:
+    st.session_state.article_title = ""
     st.session_state.claim = text
     st.session_state.pop("last_result", None)
 
@@ -139,6 +138,7 @@ def set_random_sample() -> None:
 
 
 def clear_claim() -> None:
+    st.session_state.article_title = ""
     st.session_state.claim = ""
     st.session_state.pop("last_result", None)
     st.session_state.pop("last_record", None)
@@ -155,6 +155,7 @@ def clear_history() -> None:
 
 def open_history_item(index: int) -> None:
     item = st.session_state.history[index]
+    st.session_state.article_title = ""
     st.session_state.claim = item["claim"]
     st.session_state.last_result = item["result"]
 
@@ -169,7 +170,7 @@ with st.sidebar:
             if section == group:
                 st.button(f"{icon}   {page}   ·   {subtitle}", key=f"nav_{page}", type="primary" if st.session_state.page == page else "secondary", width="stretch", on_click=go, args=(page,))
     state_dot = "#34d399" if PIPELINE_READY else "#f59e0b"
-    st.markdown(f'<div class="statusbox"><div class="online" style="color:{state_dot}"><i style="background:{state_dot};box-shadow:0 0 5px 2px {state_dot}55,0 0 13px {state_dot}88"></i>{"SYSTEM OPERATIONAL" if PIPELINE_READY else "SETUP REQUIRED"}</div><div class="statusmodel"><span>MODEL</span><b>{html.escape(MODEL_NAME if MODEL_READY else "Artifacts unavailable")}</b></div><div class="statusmodel"><span>DATASET</span><b>{"LIAR Benchmark" if DATASET_READY else "Files unavailable"}</b></div><div class="statusline"><span>MODEL</span><em class="{"ready" if MODEL_READY else "waiting"}">{"READY" if MODEL_READY else "WAITING"}</em></div><div class="statusline"><span>VECTORIZER</span><em class="{"ready" if VECTORIZER_READY else "waiting"}">{"READY" if VECTORIZER_READY else "WAITING"}</em></div><div class="statusline"><span>DATASET</span><em class="{"ready" if DATASET_READY else "waiting"}">{"READY" if DATASET_READY else "WAITING"}</em></div><div class="statusline"><span>PIPELINE</span><em class="{"ready" if PIPELINE_READY else "waiting"}">{"READY" if PIPELINE_READY else "WAITING"}</em></div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="statusbox"><div class="online" style="color:{state_dot}"><i style="background:{state_dot};box-shadow:0 0 5px 2px {state_dot}55,0 0 13px {state_dot}88"></i>{"SYSTEM OPERATIONAL" if PIPELINE_READY else "SETUP REQUIRED"}</div><div class="statusmodel"><span>MODEL</span><b>{html.escape(MODEL_NAME if MODEL_READY else "Artifacts unavailable")}</b></div><div class="statusmodel"><span>DATASET</span><b>{"WELFake articles" if DATASET_READY else "Files unavailable"}</b></div><div class="statusline"><span>MODEL</span><em class="{"ready" if MODEL_READY else "waiting"}">{"READY" if MODEL_READY else "WAITING"}</em></div><div class="statusline"><span>VECTORIZER</span><em class="{"ready" if VECTORIZER_READY else "waiting"}">{"READY" if VECTORIZER_READY else "WAITING"}</em></div><div class="statusline"><span>DATASET</span><em class="{"ready" if DATASET_READY else "waiting"}">{"READY" if DATASET_READY else "WAITING"}</em></div><div class="statusline"><span>PIPELINE</span><em class="{"ready" if PIPELINE_READY else "waiting"}">{"READY" if PIPELINE_READY else "WAITING"}</em></div></div>', unsafe_allow_html=True)
     st.markdown('<div style="height:10px"></div><div class="smallmuted">TruthLens v1.0<br>NLP · ML · Explainable AI</div>', unsafe_allow_html=True)
 
 
@@ -178,7 +179,7 @@ def eyebrow(text: str) -> None:
 
 
 def disclaimer() -> None:
-    st.markdown('<div class="disclaimer">TruthLens analyzes language patterns learned from the LIAR dataset. Its output is a model interpretation, not factual verification or a substitute for checking primary sources.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="disclaimer">The displayed probabilities are Logistic Regression model confidence based on patterns learned from WELFake. They are not independent fact verification.</div>', unsafe_allow_html=True)
 
 
 def metric_card(label: str, value: str, hint: str = "", tone: str = "#22D3EE") -> None:
@@ -230,9 +231,8 @@ def make_report(record: dict) -> dict:
         "title": "TruthLens Analysis",
         "claim": record["claim"],
         "prediction": result["label"],
-        "binary_interpretation": result["binary_interpretation"],
         "model_confidence": result["confidence"],
-        "class_probabilities": result["probabilities"],
+        "probabilities": result["probabilities"],
         "model": result["model_name"],
         "timestamp": record["timestamp"],
         "explanation": result.get("explanation"),
@@ -263,35 +263,36 @@ page = st.session_state.page
 if page == "Home":
     st.markdown(f'<div class="hero"><span class="pill"><span style="color:#34d399">●</span> AI RESEARCH INTERFACE &nbsp;·&nbsp; {"MODEL READY" if MODEL_READY else "ARTIFACTS REQUIRED"}</span><h1>TRUTHLENS<br><span class="accent">See the signal behind the story.</span></h1><p>Analyze language patterns, compare model predictions, and understand what influenced the classifier.</p></div>', unsafe_allow_html=True)
     st.markdown('<div class="grid3"><div class="feature"><span class="num">01 / INSPECT</span><h3><span class="ico">✦</span>ANALYZE</h3><p>Paste a claim and inspect the model’s prediction.</p></div><div class="feature"><span class="num">02 / INTERPRET</span><h3><span class="ico" style="color:#a78bfa;background:#8b5cf61a">⌁</span>UNDERSTAND</h3><p>See which language patterns influenced the result.</p></div><div class="feature"><span class="num">03 / EXPLORE</span><h3><span class="ico" style="color:#60a5fa;background:#3b82f61a">◫</span>EXPLORE</h3><p>Compare models, metrics, dataset and methodology.</p></div></div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="statusstrip"><div class="stripitem"><span>Model</span><b>{html.escape(MODEL_NAME if MODEL_READY else "Unavailable")}</b></div><div class="stripitem"><span>Dataset</span><b>{"LIAR benchmark · ready" if DATASET_READY else "Dataset files missing"}</b></div><div class="stripitem"><span>Pipeline</span><b>{"TF-IDF · ready" if PIPELINE_READY else "Setup required"}</b></div><div class="stripitem"><span>Test status</span><b>{"Held-out · "+fmt_pct(TEST.get("accuracy")) if TEST else "Metrics unavailable"}</b></div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="statusstrip"><div class="stripitem"><span>Model</span><b>{html.escape(MODEL_NAME if MODEL_READY else "Unavailable")}</b></div><div class="stripitem"><span>Dataset</span><b>{"WELFake · ready" if DATASET_READY else "Dataset file missing"}</b></div><div class="stripitem"><span>Pipeline</span><b>{"TF-IDF · ready" if PIPELINE_READY else "Setup required"}</b></div><div class="stripitem"><span>Test status</span><b>{"Held-out · "+fmt_pct(TEST.get("accuracy")) if TEST else "Metrics unavailable"}</b></div></div>', unsafe_allow_html=True)
     c1,c2=st.columns([1,1]);
     with c1:
-        st.markdown('<div class="panel"><div class="eyebrow">START HERE</div><h3 style="margin-top:10px">Inspect a political statement</h3><p class="smallmuted">Enter a claim to see a six-class prediction and an aggregated binary interpretation.</p></div>',unsafe_allow_html=True)
+        st.markdown('<div class="panel"><div class="eyebrow">START HERE</div><h3 style="margin-top:10px">Analyze a news article</h3><p class="smallmuted">Enter a headline and article text to see the binary prediction and both class probabilities.</p></div>',unsafe_allow_html=True)
         st.button("✦  Analyze a claim", type="primary", on_click=go, args=("Analyze",), key="home_analyze")
     with c2:
-        st.markdown('<div class="panel"><div class="eyebrow">RESEARCH NOTE</div><h3 style="margin-top:10px">A benchmark model, with limits</h3><p class="smallmuted">The six-class test accuracy is shown directly from saved evaluation results. Text classification cannot determine whether a claim is true in the real world.</p></div>',unsafe_allow_html=True)
+        st.markdown('<div class="panel"><div class="eyebrow">RESEARCH NOTE</div><h3 style="margin-top:10px">A benchmark model, with limits</h3><p class="smallmuted">Binary test metrics are shown directly from saved evaluation results. Text classification cannot independently verify a claim.</p></div>',unsafe_allow_html=True)
     disclaimer()
 
 elif page == "Analyze":
     eyebrow("ANALYZE THE SIGNAL")
-    st.title("Analyze a Claim")
-    st.markdown('<div class="subhead">Paste a claim and see how the classifier interprets it.</div>',unsafe_allow_html=True)
+    st.title("Analyze a News Article")
+    st.markdown('<div class="subhead">Enter a headline and article text to inspect the binary classifier output.</div>',unsafe_allow_html=True)
     with st.container(border=True):
-        st.markdown('<div class="eyebrow">CLAIM INPUT</div>',unsafe_allow_html=True)
+        st.markdown('<div class="eyebrow">ARTICLE INPUT</div>',unsafe_allow_html=True)
         uploaded=st.file_uploader("Upload a UTF-8 text file (optional)", type=["txt"], accept_multiple_files=False)
         if uploaded is not None:
             try:
-                uploaded_text=uploaded.getvalue().decode("utf-8-sig")[:6000]
+                uploaded_text=uploaded.getvalue().decode("utf-8-sig")[:100000]
                 if st.session_state.get("uploaded_name") != uploaded.name:
                     st.session_state.claim=uploaded_text
                     st.session_state.uploaded_name=uploaded.name
                     clear_current_result()
             except UnicodeDecodeError: st.error("The text file could not be decoded as UTF-8. Paste the claim or choose a UTF-8 .txt file.")
-        claim_text=st.text_area("Claim or statement", placeholder="Paste a political claim or statement here…", height=185, max_chars=6000, key="claim", help="Up to 6,000 characters. The classifier requires at least three meaningful words.",on_change=clear_current_result)
+        article_title=st.text_input("Headline (optional)",placeholder="Paste the news headline here…",key="article_title",on_change=clear_current_result)
+        claim_text=st.text_area("Article text", placeholder="Paste the article body here…", height=260, max_chars=100000, key="claim", help="Up to 100,000 characters. The classifier requires at least three meaningful words.",on_change=clear_current_result)
         count_cols=st.columns([1,1,2])
         count_cols[0].caption(f"{len(claim_text.split())} words")
-        count_cols[1].caption(f"{len(claim_text)} / 6,000 characters")
-        count_cols[2].caption("Your claim stays in this session and is not saved to a database.")
+        count_cols[1].caption(f"{len(claim_text)} / 100,000 characters")
+        count_cols[2].caption("Headline and article text stay in this session and are not saved to a database.")
         sample_rows=[st.columns(2),st.columns(2)]
         sample_actions=[
             ("Sample claim 01","sample_claim_0",set_sample,(SAMPLE_CLAIMS[0],)),
@@ -310,15 +311,16 @@ elif page == "Analyze":
             st.button("Clear",key="clear_claim",type="secondary",width="stretch",on_click=clear_claim)
     if analyze:
         clear_current_result()
-        if not claim_text.strip():
-            st.info("Enter a claim or choose a sample to begin.")
+        if not article_title.strip() and not claim_text.strip():
+            st.info("Enter an article headline or text, or choose a sample to begin.")
         elif not MODEL_READY:
             st.error("The saved model files are not available. Follow the setup steps in the README, then restart TruthLens.")
         else:
             try:
                 with st.spinner("Analyzing language patterns…"):
-                    result=predict_statement(claim_text,get_artifacts())
-                record={"claim":claim_text.strip(),"result":result,"timestamp":datetime.now().astimezone().isoformat(timespec="seconds")}
+                    result=predict_article(article_title,claim_text,get_artifacts())
+                claim_display="\n\n".join(part.strip() for part in (article_title,claim_text) if part.strip())
+                record={"claim":claim_display,"result":result,"timestamp":datetime.now().astimezone().isoformat(timespec="seconds")}
                 st.session_state.last_result=result
                 st.session_state.last_record=record
                 st.session_state.history.insert(0,record)
@@ -332,10 +334,10 @@ elif page == "Analyze":
     result=st.session_state.get("last_result")
     if result:
         record=st.session_state.get("last_record",{"claim":st.session_state.claim,"result":result,"timestamp":"Unknown"})
-        st.markdown(f'<div class="resultbox"><div class="eyebrow">TRUTHLENS VERDICT</div><div class="prediction" style="color:#c4b5fd">{html.escape(result["label"])}</div><div style="color:#cbd5e1;font-size:13px">The classifier assigns this claim primarily to the <b>{html.escape(result["label"])}</b> category.</div><div class="resultmeta"><div><span>MODEL CONFIDENCE</span><b>{result["confidence"]:.2%}</b></div><div><span>BINARY INTERPRETATION</span><b>{html.escape(result["binary_interpretation"])}</b></div><div><span>MODEL</span><b>{html.escape(result["model_name"])}</b></div></div><div class="bartrack"><div class="barfill" style="width:{result["confidence"]*100:.2f}%"></div></div><div class="smallmuted" style="margin-top:8px">Model confidence is the model’s score for its selected class. It is not the probability that the claim is factually true or false.</div></div>',unsafe_allow_html=True)
+        st.markdown(f'<div class="resultbox"><div class="eyebrow">TRUTHLENS VERDICT</div><div class="prediction" style="color:#c4b5fd">{html.escape(result["label"])}</div><div class="resultmeta"><div><span>FAKE PROBABILITY · MODEL CONFIDENCE</span><b>{result["fake_probability"]:.1%}</b></div><div><span>REAL PROBABILITY · MODEL CONFIDENCE</span><b>{result["real_probability"]:.1%}</b></div><div><span>MODEL</span><b>{html.escape(result["model_name"])}</b></div></div><div class="smallmuted" style="margin-top:8px">These are model confidence scores from Logistic Regression, not independent fact verification.</div></div>',unsafe_allow_html=True)
         left,right=st.columns([1.05,.95])
         with left:
-            st.markdown('<div class="panel"><div class="eyebrow">TRUTHFULNESS SIGNAL</div><h3 style="margin-top:9px">Six-class probabilities</h3>',unsafe_allow_html=True)
+            st.markdown('<div class="panel"><div class="eyebrow">BINARY MODEL OUTPUT</div><h3 style="margin-top:9px">Class probabilities</h3>',unsafe_allow_html=True)
             probability_rows(result["probabilities"],result["label"])
             st.markdown('</div>',unsafe_allow_html=True)
         with right:
@@ -346,9 +348,8 @@ elif page == "Analyze":
         report_text=("TruthLens Analysis\n"
             f"Claim: {report['claim']}\n"
             f"Prediction: {report['prediction']}\n"
-            f"Binary interpretation: {report['binary_interpretation']}\n"
-            f"Model confidence: {report['model_confidence']:.2%}\n"
-            f"Six-class probabilities: {json.dumps(report['class_probabilities'],ensure_ascii=False)}\n"
+            f"Predicted class confidence: {report['prediction']}: {report['model_confidence']:.1%}\n"
+            f"Binary probabilities: {json.dumps(report['probabilities'],ensure_ascii=False)}\n"
             f"Model: {report['model']}\nTimestamp: {report['timestamp']}\n"
             f"Explanation: {json.dumps(report['explanation'],ensure_ascii=False)}\n"
             f"Disclaimer: {report['disclaimer']}\n")
@@ -381,121 +382,88 @@ elif page == "Model Lab":
     head,cta=st.columns([5,1.5],vertical_alignment="center")
     with head:
         eyebrow("MODEL MONITORING"); st.title("Model Lab")
-        st.markdown('<div class="subhead">Saved evaluation results for the official LIAR validation and held-out test splits.</div>',unsafe_allow_html=True)
+        st.markdown('<div class="subhead">Validation and held-out test performance for the WELFake binary news classifier.</div>',unsafe_allow_html=True)
     with cta:
-        st.button("✦  Analyze a new claim →",key="model_lab_analyze",type="secondary",on_click=go,args=("Analyze",),width="content")
-    if not TEST: st.warning("Evaluation metrics are unavailable. Train/evaluate the project to produce the metrics artifact.")
+        st.button("✦  Analyze an article →",key="model_lab_analyze",type="secondary",on_click=go,args=("Analyze",),width="content")
+    if not TEST:
+        st.warning("Evaluation metrics are unavailable. Run python src/train.py to train the WELFake model.")
     else:
         cols=st.columns(4)
-        for col,label,key,tone in zip(cols,["TEST ACCURACY","MACRO F1","MACRO PRECISION","MACRO RECALL"],["accuracy","macro_f1","macro_precision","macro_recall"],["#22D3EE","#8B5CF6","#3B82F6","#22C55E"]):
-            with col: metric_card(label,fmt_pct(TEST.get(key)),"Six-class LIAR test split",tone)
-        st.markdown("<br>",unsafe_allow_html=True)
-        overview, sixclass, binary = st.tabs(["Overview & validation", "Six-class test", "Binary interpretation"])
-        with overview:
-            st.markdown('<div class="panel"><div class="panelhead"><div><div class="eyebrow">MODEL LEADERBOARD</div><h3 style="margin-top:7px">Validation and cross-validation performance</h3></div><span class="pill">★ SELECTED · '+html.escape(MODEL_NAME.upper())+'</span></div>',unsafe_allow_html=True)
-            rows=[]
-            for name,metrics in VALIDATION.items():
-                cv=METRICS.get("cross_validation",{}).get(name,{})
-                rows.append({"Model":name,"Validation accuracy":fmt_pct(metrics.get("accuracy")),"Validation macro F1":fmt_pct(metrics.get("macro_f1")),"CV macro F1":fmt_pct(cv.get("mean_macro_f1")),"Status": "★ SELECTED" if name==MODEL_NAME else "Candidate"})
-            if rows:
-                leaderboard=pd.DataFrame(rows)
-                def highlight_selected(row):
-                    selected=row.get("Model")==MODEL_NAME
-                    return ["background-color: rgba(34,211,238,.12); color: #e0f2fe; font-weight: 700" if selected else "" for _ in row]
-                st.dataframe(leaderboard.style.apply(highlight_selected,axis=1),hide_index=True,width="stretch")
-            st.markdown('</div>',unsafe_allow_html=True)
-            st.markdown(f'<div class="panel"><div class="eyebrow">WHY THIS MODEL?</div><h3 style="margin-top:7px">Selection follows validation performance</h3><p class="smallmuted">{html.escape(MODEL_NAME)} was selected using validation and cross-validation results. The test split remains held out for final evaluation and was not used to tune or select the model. The KPI cards above show the selected model’s actual held-out test metrics.</p></div>',unsafe_allow_html=True)
-        with sixclass:
-            l,r=st.columns([1.2,.8])
-            with l:
-                st.markdown('<div class="panel"><div class="eyebrow">CONFUSION MATRIX</div><h3 style="margin-top:6px">Six-class test split</h3>',unsafe_allow_html=True)
-                fig=plot_confusion(TEST.get("confusion_matrix",[]),[s.upper() for s in LABELS],"LIAR six-class confusion matrix")
+        for col,label,key,tone in zip(cols,["TEST ACCURACY","MACRO F1","MACRO PRECISION","MACRO RECALL"],["accuracy","f1_macro","precision_macro","recall_macro"],["#22D3EE","#8B5CF6","#3B82F6","#22C55E"]):
+            with col: metric_card(label,fmt_pct(TEST.get(key)),"WELFake held-out test split",tone)
+        validation_tab,test_tab=st.tabs(["Validation", "Held-out test"])
+        with validation_tab:
+            st.markdown('<div class="panel"><div class="eyebrow">TRAINING DESIGN</div><h3 style="margin-top:7px">Single binary Logistic Regression model</h3><p class="smallmuted">TF-IDF and Logistic Regression were fitted on the stratified training split only. Validation data was used for evaluation and the test split was held out until final reporting.</p></div>',unsafe_allow_html=True)
+            if VALIDATION:
+                metrics=VALIDATION
+                cols=st.columns(4)
+                for col,label,key in zip(cols,["VALIDATION ACCURACY","MACRO F1","MACRO PRECISION","MACRO RECALL"],["accuracy","f1_macro","precision_macro","recall_macro"]):
+                    with col: metric_card(label,fmt_pct(metrics.get(key)),"WELFake validation split")
+        with test_tab:
+            left,right=st.columns([1.2,.8])
+            with left:
+                st.markdown('<div class="panel"><div class="eyebrow">CONFUSION MATRIX</div><h3 style="margin-top:6px">WELFake test split</h3>',unsafe_allow_html=True)
+                fig=plot_confusion(TEST.get("confusion_matrix",[]),LABELS,"WELFake binary confusion matrix")
                 st.pyplot(fig,width="stretch");plt.close(fig);st.markdown('</div>',unsafe_allow_html=True)
-            with r:
+            with right:
                 st.markdown('<div class="panel"><div class="eyebrow">PER-CLASS METRICS</div><h3 style="margin-top:6px">Classification report</h3>',unsafe_allow_html=True)
                 report=TEST.get("classification_report",{})
-                df=pd.DataFrame([{ "Class":l,"Precision":fmt_pct(v.get("precision")),"Recall":fmt_pct(v.get("recall")),"F1":fmt_pct(v.get("f1-score")),"Support":int(v.get("support",0))} for l,v in report.items() if l in LABELS])
+                df=pd.DataFrame([{ "Class":label,"Precision":fmt_pct(values.get("precision")),"Recall":fmt_pct(values.get("recall")),"F1":fmt_pct(values.get("f1-score")),"Support":int(values.get("support",0))} for label,values in report.items() if label in LABELS])
                 st.dataframe(df,hide_index=True,width="stretch");st.markdown('</div>',unsafe_allow_html=True)
-        with binary:
-            b=TEST.get("binary_interpretation",{})
-            cols=st.columns(4)
-            for col,label,key,tone in zip(cols,["BINARY ACCURACY","MACRO F1","PRECISION","RECALL"],["accuracy","macro_f1","macro_precision","macro_recall"],["#22D3EE","#8B5CF6","#3B82F6","#22C55E"]):
-                with col: metric_card(label,fmt_pct(b.get(key)),"Aggregated from six LIAR labels",tone)
-            st.markdown('<div class="smallmuted" style="margin-top:12px">Binary interpretation groups pants-fire, false and barely-true as lower truthfulness; half-true, mostly-true and true as higher truthfulness.</div>',unsafe_allow_html=True)
         disclaimer()
 
 elif page == "Dataset":
-    eyebrow("DATA EXPLORER"); st.title("LIAR Benchmark")
-    st.markdown('<div class="subhead">Official train, validation and test files, preserved as separate splits.</div>',unsafe_allow_html=True)
+    eyebrow("DATA EXPLORER"); st.title("WELFake Articles")
+    st.markdown('<div class="subhead">Binary article corpus used to train the production fake-news classifier.</div>',unsafe_allow_html=True)
     try:
-        splits,_=load_dataset()
-        loaded_dims={name:len(frame) for name,frame in splits.items()}
-        dims=METRICS.get("dataset_dimensions") or loaded_dims
-        avg=float(pd.concat(splits.values())["word_count"].mean())
+        frame,summary=load_dataset()
+        splits=stratified_splits(frame)
+        dims={name:len(part) for name,part in splits.items()}
+        avg=float(frame["article"].map(lambda value: len(str(value).split())).mean())
         cols=st.columns(4)
-        for col,(label,value,tone) in zip(cols,[("TRAIN",f'{dims["train"]:,}',"#22D3EE"),("VALIDATION",f'{dims["validation"]:,}',"#8B5CF6"),("TEST",f'{dims["test"]:,}',"#3B82F6"),("AVG. STATEMENT LENGTH",f"{avg:.1f} words","#34D399")]):
-            with col: metric_card(label,value,"LIAR official split" if label!="AVG. STATEMENT LENGTH" else "Across loaded splits",tone)
-        selected=st.selectbox("Split",list(splits.keys()),format_func=lambda x:x.title())
-        frame=splits[selected]
+        for col,(label,value,tone) in zip(cols,[("TOTAL ARTICLES",f'{summary["total_samples"]:,}',"#22D3EE"),("FAKE",f'{summary["class_distribution"]["FAKE"]:,}',"#F43F5E"),("REAL",f'{summary["class_distribution"]["REAL"]:,}',"#34D399"),("AVG. ARTICLE LENGTH",f"{avg:.0f} words","#8B5CF6")]):
+            with col: metric_card(label,value,"After empty and duplicate removal",tone)
+        st.markdown(f'<div class="panel"><div class="eyebrow">STRATIFIED SPLIT SIZES</div><p class="smallmuted">Train {dims["train"]:,} · Validation {dims["validation"]:,} · Test {dims["test"]:,}. Exact duplicate articles are removed before splitting.</p><p class="smallmuted">WELFake label mapping: 0 → FAKE, 1 → REAL. Subject/date metadata is excluded from model features.</p></div>',unsafe_allow_html=True)
         chart,data=st.columns([1,1])
         with chart:
-            st.markdown('<div class="panel"><div class="eyebrow">CLASS DISTRIBUTION</div><h3 style="margin-top:6px">LIAR label count by class</h3><div class="smallmuted" style="margin:2px 0 8px">Original label totals from the selected official split</div>',unsafe_allow_html=True)
-            distribution=METRICS.get("class_distribution",{}).get(selected,{})
-            counts=pd.Series(distribution if distribution else frame["label"].value_counts().to_dict()).reindex(LABELS,fill_value=0)
-            fig,ax=plt.subplots(figsize=(8,4),facecolor="#101D30");ax.set_facecolor("#101D30")
-            chart_colors=["#22D3EE","#22D3EE","#3B82F6","#3B82F6","#6366F1","#6366F1"]
-            bars=ax.bar(range(len(LABELS)),counts.values,color=chart_colors,width=.68)
-            ax.set_title("Statements by truthfulness label",color="#E2E8F0",fontsize=11,fontweight="bold",pad=13)
-            ax.set_ylabel("Number of statements",color="#94A3B8",fontsize=9,labelpad=8)
-            ax.set_xticks(range(len(LABELS)),[x.upper() for x in LABELS],rotation=18,ha="right",color="#CBD5E1",fontsize=9)
-            ax.tick_params(axis="y",colors="#94A3B8",labelsize=9,pad=5);ax.grid(axis="y",color="#26364c",alpha=.65,linewidth=.7);ax.set_axisbelow(True);ax.margins(x=.06)
-            ax.bar_label(bars,fmt="%d",padding=3,color="#CBD5E1",fontsize=8)
+            st.markdown('<div class="panel"><div class="eyebrow">CLASS DISTRIBUTION</div><h3 style="margin-top:6px">Binary class totals</h3>',unsafe_allow_html=True)
+            counts=summary["class_distribution"]
+            fig,ax=plt.subplots(figsize=(7,4),facecolor="#101D30");ax.set_facecolor("#101D30")
+            bars=ax.bar(LABELS,[counts[label] for label in LABELS],color=COLORS,width=.62)
+            ax.set_ylabel("Articles",color="#94A3B8");ax.tick_params(colors="#CBD5E1")
+            ax.bar_label(bars,fmt="%d",padding=3,color="#CBD5E1",fontsize=9)
             for spine in ax.spines.values():spine.set_visible(False)
             fig.tight_layout();st.pyplot(fig,width="stretch");plt.close(fig);st.markdown('</div>',unsafe_allow_html=True)
         with data:
-            st.markdown('<div class="panel"><div class="eyebrow">COMMON SUBJECTS</div><h3 style="margin-top:6px">Most frequent statement subjects</h3><div class="smallmuted" style="margin:2px 0 8px">Top topic tags in the selected official split</div>',unsafe_allow_html=True)
-            subjects=frame["subjects"].fillna("").str.split(",").explode().str.strip();subjects=subjects[subjects.ne("")].value_counts().head(10).sort_values()
-            if not subjects.empty:
-                fig,ax=plt.subplots(figsize=(8,4),facecolor="#101D30");ax.set_facecolor("#101D30");ax.barh(subjects.index,subjects.values,color="#3B82F6",height=.66)
-                ax.set_title("Most common LIAR subject tags",color="#E2E8F0",fontsize=11,fontweight="bold",pad=13)
-                ax.set_xlabel("Tag occurrences",color="#94A3B8",fontsize=9,labelpad=8)
-                ax.tick_params(colors="#CBD5E1",labelsize=9,pad=5);ax.grid(axis="x",color="#26364c",alpha=.65,linewidth=.7);ax.set_axisbelow(True);ax.margins(x=.1)
-                ax.bar_label(ax.containers[0],fmt="%d",padding=3,color="#CBD5E1",fontsize=8)
-                for spine in ax.spines.values():spine.set_visible(False)
-                fig.tight_layout();st.pyplot(fig,width="stretch");plt.close(fig)
+            st.markdown('<div class="panel"><div class="eyebrow">CLEANING SUMMARY</div><h3 style="margin-top:6px">Leakage prevention</h3>',unsafe_allow_html=True)
+            st.write({"source rows":summary["source_rows"],"empty articles removed":summary["empty_articles_removed"],"duplicate articles removed":summary["duplicate_articles_removed"],"conflicting duplicate rows removed":summary["conflicting_duplicate_rows_removed"]})
             st.markdown('</div>',unsafe_allow_html=True)
-        labels_col,binary_col=st.columns(2)
-        with labels_col:
-            st.markdown('<div class="panel"><div class="eyebrow">ORIGINAL LIAR LABELS</div><h3 style="margin-top:7px">Six truthfulness categories</h3><p class="smallmuted">pants-fire · false · barely-true · half-true · mostly-true · true</p></div>',unsafe_allow_html=True)
-        with binary_col:
-            st.markdown('<div class="panel"><div class="eyebrow">PROJECT-LEVEL GROUPING</div><h3 style="margin-top:7px">Binary interpretation</h3><p class="smallmuted">pants-fire / false / barely-true → lower truthfulness; half-true / mostly-true / true → higher truthfulness. This project grouping does not mean “half-true” is literally real.</p></div>',unsafe_allow_html=True)
-        st.info("LIAR contains short political claims rather than complete news articles. Its labels and benchmark performance should be interpreted in that context.")
-        st.markdown('<div class="panel"><div class="eyebrow">SAMPLE STATEMENTS</div><h3 style="margin-top:6px">Explore this split</h3>',unsafe_allow_html=True)
-        st.dataframe(frame[["label","statement","subjects","speaker"]].head(25),hide_index=True,width="stretch")
-        st.markdown('</div>',unsafe_allow_html=True)
+        selected=st.selectbox("Split",list(splits),format_func=lambda value:value.title())
+        st.dataframe(splits[selected][["label","title","text"]].head(25),hide_index=True,width="stretch")
+        st.info("WELFake is a labeled benchmark, not a live fact-checking source. Its model confidence reflects learned dataset patterns.")
     except (FileNotFoundError,ValueError) as exc:
         st.warning(str(exc))
     disclaimer()
 
 elif page == "Methodology":
     eyebrow("RESEARCH PIPELINE"); st.title("How TruthLens works")
-    st.markdown('<div class="subhead">A viva-ready walkthrough of the LIAR benchmark pipeline, from raw statement to interpretable model output.</div>',unsafe_allow_html=True)
+    st.markdown('<div class="subhead">A full-article binary classification pipeline trained on WELFake.</div>',unsafe_allow_html=True)
     steps=[
-        ("◉","RAW CLAIM","A political statement enters the app as plain text; no external fact source is queried."),
-        ("⌁","CLEANING","Shared preprocessing normalizes case and removes markup and URLs."),
-        ("Aa","TOKENIZATION","The text is split into normalized word and numeric tokens by the project’s tokenizer."),
-        ("▦","TF-IDF","Word uni-grams and bi-grams are represented with the fitted TF-IDF vectorizer."),
-        ("⚙","MODEL TRAINING","Candidate classical classifiers are trained on the official training split."),
-        ("◫","VALIDATION","Validation and five-fold cross-validation results compare candidate performance."),
-        ("★","MODEL SELECTION","The selected model follows validation evidence; the test split does not guide selection."),
-        ("✓","HELD-OUT TEST","The selected model is evaluated on the separate official test split for final metrics."),
-        ("✦","PREDICTION","The app returns one LIAR class, six model scores and the project-level binary grouping."),
-        ("⌕","EXPLAINABILITY","For the linear model, local TF-IDF contributions show terms that support or push away from the selected class."),
+        ("◉","SOURCE ARTICLES","WELFake title, text, and binary label are loaded; subject/date are not used."),
+        ("⌁","LABELS","The published WELFake label encoding maps 0 to FAKE and 1 to REAL."),
+        ("Aa","TEXT CLEANING","Title and body are joined, lowercased, and cleaned of URLs, markup, and excess whitespace."),
+        ("▦","DUPLICATE CONTROL","Empty articles are removed; exact duplicate content and label-conflicting duplicate groups are removed before splitting."),
+        ("⚙","STRATIFIED SPLIT","A fixed seed creates 80% training, 10% validation, and 10% held-out test data."),
+        ("▤","TF-IDF","The vectorizer is fit only on training article text; validation and test are transform-only."),
+        ("◫","LOGISTIC REGRESSION","The binary Logistic Regression model is fit only on the training matrix."),
+        ("✓","EVALUATION","Validation and test metrics include accuracy, macro precision/recall/F1, confusion matrix, and class report."),
+        ("✦","INFERENCE","The app loads the saved WELFake vectorizer/model and displays both predict_proba outputs."),
+        ("⌕","EXPLAINABILITY","Feature contributions use this binary model's TF-IDF values and Logistic Regression coefficients."),
     ]
-    st.markdown('<div class="panel"><div class="eyebrow">END-TO-END METHOD</div><h3 style="margin-top:7px">From statement to model interpretation</h3><div class="pipeline-list">'+''.join(f'<div class="pipeline-step"><div class="pipeline-marker">{icon}</div><div class="pipeline-title">{title}</div><div class="pipeline-desc">{desc}</div></div>' for icon,title,desc in steps)+'</div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="panel"><div class="eyebrow">END-TO-END METHOD</div><h3 style="margin-top:7px">From article text to model output</h3><div class="pipeline-list">'+''.join(f'<div class="pipeline-step"><div class="pipeline-marker">{icon}</div><div class="pipeline-title">{title}</div><div class="pipeline-desc">{desc}</div></div>' for icon,title,desc in steps)+'</div></div>',unsafe_allow_html=True)
     left,right=st.columns(2)
     with left:
-        st.markdown('<div class="panel"><div class="eyebrow">LABELS</div><h3 style="margin-top:8px">Six original LIAR categories</h3><p class="smallmuted">pants-fire · false · barely-true · half-true · mostly-true · true</p><p class="smallmuted">The UI also presents an aggregated binary interpretation, grouping the first three labels as lower truthfulness and the last three as higher truthfulness.</p></div>',unsafe_allow_html=True)
+        st.markdown('<div class="panel"><div class="eyebrow">PRODUCTION MODEL</div><h3 style="margin-top:8px">WELFake · Logistic Regression</h3><p class="smallmuted">The production classifier uses the WELFake binary article labels. The historical LIAR model is not loaded by inference.</p></div>',unsafe_allow_html=True)
     with right:
-        st.markdown('<div class="panel"><div class="eyebrow">LIMITATIONS</div><h3 style="margin-top:8px">A learned signal is not a fact check</h3><p class="smallmuted">The classifier recognizes patterns in labeled training text. Probability values describe its model output and confidence, not a calibrated measure of real-world truth. Performance is modest on the six-class held-out benchmark.</p></div>',unsafe_allow_html=True)
+        st.markdown('<div class="panel"><div class="eyebrow">MODEL CONFIDENCE</div><h3 style="margin-top:8px">Not independent verification</h3><p class="smallmuted">Probabilities come directly from Logistic Regression predict_proba(). They measure model confidence based on the training corpus and do not verify claims against evidence.</p></div>',unsafe_allow_html=True)
     disclaimer()

@@ -1,23 +1,22 @@
-"""Local multiclass linear-model feature contributions."""
+"""Local binary Logistic Regression feature contributions."""
 from __future__ import annotations
 
 import numpy as np
 
 
 def explain_prediction(text: str, vectorizer, model, predicted_label: str, limit: int = 8) -> dict:
-    """Compare the predicted class score with its strongest competing class."""
+    """Show signed TF-IDF contributions toward the predicted binary class."""
     if not hasattr(model, "coef_"):
         return {"available": False, "features": [], "competitor": None}
     vector = vectorizer.transform([text])
     classes = list(model.classes_)
     predicted_index = classes.index(predicted_label)
-    if hasattr(model, "decision_function"):
-        scores = np.asarray(model.decision_function(vector)).reshape(-1)
-        competitor_index = int(np.argsort(scores)[-2])
-    else:
-        competitor_index = (predicted_index + 1) % len(classes)
     coefficients = np.asarray(model.coef_)
-    contrast = coefficients[predicted_index] - coefficients[competitor_index]
+    if len(classes) != 2 or coefficients.shape[0] != 1:
+        return {"available": False, "features": [], "competitor": None}
+    competitor_index = 1 - predicted_index
+    # sklearn's binary coefficient row is oriented toward classes_[1].
+    contrast = coefficients[0] if predicted_index == 1 else -coefficients[0]
     contributions = vector.multiply(contrast).tocoo()
     names = vectorizer.get_feature_names_out()
     order = np.argsort(np.abs(contributions.data))[::-1][:limit]
