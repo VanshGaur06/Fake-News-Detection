@@ -1,59 +1,78 @@
-"""Load the WELFake production artifacts and classify full news articles."""
-from __future__ import annotations
-
+"""Inference module for predicting truthfulness of news claims."""
 import json
 from pathlib import Path
+import sys
 import joblib
 
-ROOT = Path(__file__).resolve().parents[1]
-MODEL_DIR = ROOT / "models"
-CLASS_LABELS = ("FAKE", "REAL")
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
+from src.dataset import clean_text, CLASSES
+from src.explain import explain_prediction
 
-class ModelNotTrainedError(FileNotFoundError):
-    pass
+MODEL_DIR = ROOT_DIR / "models"
 
 
 def load_artifacts(model_dir: Path = MODEL_DIR) -> dict:
-    paths = {"model": model_dir / "fake_news_model.joblib",
-             "vectorizer": model_dir / "fake_news_vectorizer.joblib",
-             "metadata": model_dir / "fake_news_metadata.json"}
-    missing = [str(path) for path in paths.values() if not path.exists()]
-    if missing:
-        raise ModelNotTrainedError("WELFake model artifacts are missing. Run: python src/train.py")
-    artifacts = {"model": joblib.load(paths["model"]), "vectorizer": joblib.load(paths["vectorizer"])}
-    artifacts["metadata"] = json.loads(paths["metadata"].read_text(encoding="utf-8"))
-    classes = [str(label) for label in artifacts["model"].classes_]
-    if classes != list(CLASS_LABELS) or artifacts["metadata"].get("dataset") != "WELFake":
-        raise ModelNotTrainedError("Production artifacts are not the trained WELFake binary model; retrain with: python src/train.py")
-    artifacts["explainer"] = artifacts["model"]
-    return artifacts
+    """Load trained model, vectorizer, and metadata from disk."""
+    model_path = model_dir / "model.joblib"
+    vectorizer_path = model_dir / "vectorizer.joblib"
+    metadata_path = model_dir / "metadata.json"
 
+    if not model_path.exists() or not vectorizer_path.exists():
+        raise FileNotFoundError(
+            "Trained model artifacts not found. Please run 'python src/train.py' first."
+        )
 
-def predict_article(title: str, text: str, artifacts: dict) -> dict:
-    from src.preprocessing import clean_text
-    combined = " ".join(part.strip() for part in (title or "", text or "") if part and part.strip())
-    cleaned = clean_text(combined)
-    if len(cleaned.split()) < 3:
-        raise ValueError("Please enter a longer article (at least three words).")
-    vector = artifacts["vectorizer"].transform([cleaned])
-    model = artifacts["model"]
-    if not hasattr(model, "predict_proba"):
-        raise RuntimeError("The saved Logistic Regression model does not provide predict_proba().")
-    predicted = str(model.predict(vector)[0])
-    raw_probabilities = model.predict_proba(vector)[0]
-    probabilities = {label: float(raw_probabilities[list(model.classes_).index(label)])
-                     for label in CLASS_LABELS}
-    from src.explain import explain_prediction
-    explanation = explain_prediction(cleaned, artifacts["vectorizer"], model, predicted)
+    model = joblib.load(model_path)
+    vectorizer = joblib.load(vectorizer_path)
+
+    metadata = {}
+    if metadata_path.exists():
+        with open(metadata_path, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+
     return {
-        "label": predicted, "probabilities": probabilities,
-        "fake_probability": probabilities["FAKE"], "real_probability": probabilities["REAL"],
-        "confidence": probabilities[predicted], "model_name": "Logistic Regression",
-        "word_count": len(cleaned.split()), "explanation": explanation,
+        "model": model,
+        "vectorizer": vectorizer,
+        "metadata": metadata,
     }
 
 
-def predict_statement(statement: str, artifacts: dict) -> dict:
-    """Compatibility entry point for the UI's single free-text field."""
-    return predict_article("", statement, artifacts)
+def predict_claim(statement: str, artifacts: dict) -> dict:
+    """Classify a statement as FAKE or REAL and compute word contributions."""
+    cleaned = clean_text(statement)
+    if len(cleaned.split()) < 2:
+        raise ValueError("Please enter a longer claim (at least two words).")
+
+    vectorizer = artifacts["vectorizer"]
+    model = artifacts["model"]
+
+    x_vec = vectorizer.transform([cleaned])
+    predicted_label = str(model.predict(x_vec)[0])
+
+    # Class probabilities
+    probabilities = model.predict_proba(x_vec)[0]
+    class_idx = list(model.classes_).index(predicted_label)
+    confidence = float(probabilities[class_idx])
+
+    fake_idx = list(model.classes_).index("FAKE")
+    real_idx = list(model.classes_).index("REAL")
+
+    fake_prob = float(probabilities[fake_idx])
+    real_prob = float(probabilities[real_idx])
+
+    # Local feature explanations
+    explanation = explain_prediction(cleaned, vectorizer, model)
+
+    return {
+        "statement": statement,
+        "cleaned_text": cleaned,
+        "prediction": predicted_label,
+        "confidence": confidence,
+        "fake_probability": fake_prob,
+        "real_probability": real_prob,
+        "word_count": len(cleaned.split()),
+        "explanation": explanation,
+    }

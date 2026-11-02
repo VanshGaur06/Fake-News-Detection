@@ -1,8 +1,12 @@
-"""TF-IDF feature extraction for full news articles."""
+"""Feature extraction using TF-IDF for fake news detection."""
 from sklearn.feature_extraction.text import TfidfVectorizer
 
 
-def make_vectorizer(max_features: int = 120_000) -> TfidfVectorizer:
-    return TfidfVectorizer(max_features=max_features, ngram_range=(1, 2), min_df=2,
-        max_df=0.98, sublinear_tf=True, lowercase=True, strip_accents="unicode",
-        token_pattern=r"(?u)\b\w\w+\b")
+def build_vectorizer(max_features: int = 20000) -> TfidfVectorizer:
+    """Create a TF-IDF vectorizer using unigrams and bigrams."""
+    return TfidfVectorizer(
+        max_features=max_features,
+        ngram_range=(1, 2),
+        stop_words="english",
+        sublinear_tf=True,
+    )

@@ -1,55 +1,121 @@
-# TruthLens
+# TruthLens: Fake News & Claim Truthfulness Detection
 
-TruthLens is a Streamlit fake-news classifier for full news articles. Its production model is a binary Logistic Regression model trained on the WELFake dataset using article title and body text. It does not use the historical LIAR model or infer facts from external sources.
+An AI/ML Mini Project for detecting fake news and classifying the truthfulness of political claims using classical Natural Language Processing (NLP) and Machine Learning.
 
-## Dataset
+---
 
-Place `WELFake_Dataset.csv` in `data/`. The project copy has columns `title`, `text`, and `label`; the serial/index column is ignored. The dataset record defines `0 → FAKE` and `1 → REAL` ([WELFake on Zenodo](https://zenodo.org/records/4561253)). The record describes WELFake as combining Kaggle, McIntire, Reuters, and BuzzFeed Political news data.
+## 📌 Project Overview
 
-The source file in this workspace contains 72,134 rows. The source record's published class totals and the file's numeric label counts are inconsistent, so training follows the source's explicit numeric label mapping and reports the actual counts derived from the file. No article labels are inferred or rewritten from article wording.
+TruthLens addresses the challenge of misinformation by analyzing textual patterns in claims and statements. It uses the **LIAR benchmark dataset** (PolitiFact fact-checking claims) to classify claims into **FAKE** or **REAL** categories and provides word-level explainability to highlight which terms influenced the model's decision.
 
-Title and body are joined as the model input. `subject`, `date`, the serial/index column, and other metadata are excluded. The loader removes empty articles, removes duplicate article text, and drops duplicate-text groups with conflicting labels before splitting.
+### Key Features
+- **Interactive Web Interface**: Built with Streamlit for live claim analysis.
+- **Model Comparison**: Compares Logistic Regression, Multinomial Naive Bayes, and Linear SVM.
+- **Explainable AI (XAI)**: Visualizes word contributions toward FAKE or REAL.
+- **Leakage-Safe Evaluation**: Evaluates on official held-out test data with TF-IDF fitted strictly on the training partition.
 
-## Train and verify
+---
 
-```powershell
+## 📊 Dataset: LIAR Benchmark
+
+The dataset consists of 12.8k human-labeled political statements from PolitiFact across 3 official splits:
+- **Training set**: ~10,240 statements
+- **Validation set**: ~1,284 statements
+- **Test set**: ~1,283 statements
+
+### Binary Truthfulness Mapping
+PolitiFact rates claims on a 6-point scale. TruthLens maps them into binary truthfulness:
+- **FAKE**: `pants-fire`, `false`, `barely-true`
+- **REAL**: `half-true`, `mostly-true`, `true`
+
+---
+
+## 🛠️ Project Architecture & Pipeline
+
+1. **Text Preprocessing**: Lowercasing, URL removal, HTML stripping, punctuation filtering.
+2. **Feature Extraction**: TF-IDF (Term Frequency - Inverse Document Frequency) with unigrams and bigrams.
+3. **Model Training**: Evaluates candidate classifiers on the validation split and trains the primary model (Logistic Regression).
+4. **Explainability**: Calculates signed feature contributions:
+   $$\text{Contribution}(w) = \text{TF-IDF}(w) \times \text{Coefficient}(w)$$
+5. **Dashboard**: Interactive Streamlit application for inference and model evaluation.
+
+---
+
+## 🚀 How to Run
+
+### 1. Install Dependencies
+```bash
+pip install -r requirements.txt
+```
+
+### 2. Train the Model
+```bash
 python src/train.py
-python -m pytest tests -q
+```
+*This vectorizes the dataset, compares candidate models, evaluates on the test set, and saves the trained artifacts into `models/`.*
+
+### 3. Run Sample Predictions (CLI)
+```bash
 python scripts/test_model.py
+```
+
+### 4. Run the Test Suite
+```bash
+python -m pytest tests -v
+```
+
+### 5. Launch the Streamlit Web App
+```bash
 streamlit run app.py
 ```
+Open your browser at `http://localhost:8501`.
 
-Training uses a fixed-seed stratified 80/10/10 train/validation/test split. TF-IDF is fitted on the training partition only, and Logistic Regression is fitted on that same training partition only. Validation and test partitions are transform-only. The training command prints dataset size, class distribution, split sizes, validation and test accuracy, macro precision/recall/F1, confusion matrices, and classification reports.
+---
 
-`scripts/test_model.py` selects deterministic examples from both labels in the held-out test split and prints each article's input preview, source label, predicted label, FAKE probability, REAL probability, and model name.
-
-## Inference and explainability
-
-The application loads only these WELFake artifacts:
-
-- `models/fake_news_model.joblib`
-- `models/fake_news_vectorizer.joblib`
-- `models/fake_news_metadata.json`
-
-The model's classes are `['FAKE', 'REAL']`. Displayed probabilities are returned directly by Logistic Regression `predict_proba()` and represent model confidence, **not independent fact verification**. Feature contributions use the saved TF-IDF vectorizer and the same binary Logistic Regression coefficients.
-
-The previous LIAR artifacts (`final_model.joblib`, `tfidf_vectorizer.joblib`, `explanation_model.joblib`, and `metadata.joblib`) have been removed. Legacy LIAR TSV files under `data/` are not used by training or the app.
-
-## Project layout
+## 📁 Repository Structure
 
 ```text
-app.py                         # TruthLens Streamlit UI
-data/WELFake_Dataset.csv       # binary full-article source data (not committed)
-models/                        # saved WELFake model and vectorizer
-outputs/metrics/evaluation.json
-src/dataset.py                 # WELFake loading, cleaning, and stratified split
-src/preprocessing.py           # shared text cleaning
-src/features.py                # TF-IDF configuration
-src/train.py                   # training, metrics, and serialization
-src/predict.py                 # inference through the WELFake artifacts
-src/explain.py                 # binary Logistic Regression contributions
-tests/test_project.py          # split, artifact, and held-out inference tests
-scripts/test_model.py          # print held-out example predictions
+Fake-News-Detection/
+├── data/
+│   ├── train.tsv             # Official LIAR training split
+│   ├── valid.tsv             # Official LIAR validation split
+│   ├── test.tsv              # Official LIAR test split
+│   └── README.md             # Dataset documentation
+├── models/
+│   ├── model.joblib          # Trained Logistic Regression classifier
+│   ├── vectorizer.joblib     # Fitted TF-IDF vectorizer
+│   └── metadata.json         # Evaluation metrics and class distributions
+├── outputs/
+│   └── metrics/
+│       └── evaluation.json   # JSON evaluation metrics for dashboard
+├── src/
+│   ├── __init__.py           # Package init
+│   ├── dataset.py            # Data loading, cleaning, and binary mapping
+│   ├── features.py           # TF-IDF feature extraction
+│   ├── evaluate.py           # Evaluation metric computation
+│   ├── train.py              # Model training, comparison, and serialization
+│   ├── predict.py            # Prediction pipeline for user claims
+│   └── explain.py            # Word-level feature contributions
+├── scripts/
+│   └── test_model.py         # Test script on held-out test samples
+├── tests/
+│   └── test_project.py       # Pytest unit and integration test suite
+├── app.py                    # Streamlit web application
+├── requirements.txt          # Project dependencies
+└── README.md                 # Project documentation
 ```
 
-WELFake is a benchmark, not a live fact-checking service. Its article labels and source composition limit how far its measured performance generalizes.
+---
+
+## 🎓 Viva / Presentation Guide
+
+- **Q: What dataset did you use?**
+  *A: The LIAR dataset introduced by William Yang Wang, containing 12.8k fact-checked statements from PolitiFact.*
+- **Q: Why map 6 classes into binary?**
+  *A: The 6-class task is fine-grained and noisy for short text; grouping into untruthful (FAKE) vs truthful/nuanced (REAL) produces clear, actionable classification suitable for fake news detection.*
+- **Q: Why did you choose Logistic Regression as the final model?**
+  *A: Logistic Regression performed best among linear models on the validation split, provides calibrated probability estimates (`predict_proba`), and allows direct interpretation of feature coefficients for explainability.*
+- **Q: How does explainability work in TruthLens?**
+  *A: We multiply the TF-IDF weight of each word in the input by the model's corresponding coefficient. Positive values pull toward REAL, while negative values pull toward FAKE.*
+- **Q: How did you prevent data leakage?**
+  *A: The TF-IDF vectorizer was fit exclusively on the training split. Validation and test splits were transformed only.*

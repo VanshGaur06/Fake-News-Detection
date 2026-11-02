@@ -1,71 +1,80 @@
-from pathlib import Path
-import numpy as np
+"""Unit and integration tests for the TruthLens fake news detector."""
 import pytest
+import numpy as np
 
-from src.dataset import DATA_PATH, LABELS, load_dataset, stratified_splits
-from src.predict import load_artifacts, predict_article
-
-
-@pytest.fixture(scope="session")
-def dataset():
-    return load_dataset(DATA_PATH)
+from src.dataset import load_split, clean_text, CLASSES
+from src.features import build_vectorizer
+from src.predict import load_artifacts, predict_claim
+from src.explain import explain_prediction
 
 
-@pytest.fixture(scope="session")
-def heldout(dataset):
-    frame, _ = dataset
-    return stratified_splits(frame)
+def test_clean_text():
+    raw = "Breaking: Check https://example.com for <b>urgent</b> updates!!!"
+    cleaned = clean_text(raw)
+    assert "https" not in cleaned
+    assert "<b>" not in cleaned
+    assert "urgent" in cleaned
+    assert clean_text("") == ""
+    assert clean_text(None) == ""
 
 
-def test_welfake_csv_columns_rows_and_binary_mapping(dataset):
-    frame, summary = dataset
-    assert summary["source_rows"] == 72134
-    assert set(("title", "text", "article", "label")).issubset(frame.columns)
-    assert set(frame["label"].unique()) == set(LABELS)
-    assert summary["class_distribution"]["FAKE"] > 0
-    assert summary["class_distribution"]["REAL"] > 0
-    assert frame["article"].str.strip().ne("").all()
+def test_load_dataset_splits():
+    train_df = load_split("train")
+    val_df = load_split("validation")
+    test_df = load_split("test")
+
+    assert len(train_df) > 9000
+    assert len(val_df) > 1000
+    assert len(test_df) > 1000
+
+    for df in [train_df, val_df, test_df]:
+        assert set(df["label"].unique()) == set(CLASSES)
+        assert "cleaned_text" in df.columns
+        assert df["cleaned_text"].str.len().gt(0).all()
 
 
-def test_stratified_splits_are_disjoint_and_approximately_80_10_10(heldout):
-    train, validation, test = (heldout[key] for key in ("train", "validation", "test"))
-    total = len(train) + len(validation) + len(test)
-    assert abs(len(train) / total - 0.8) < 0.002
-    assert abs(len(validation) / total - 0.1) < 0.002
-    assert abs(len(test) / total - 0.1) < 0.002
-    train_texts = set(train.article.str.casefold())
-    validation_texts = set(validation.article.str.casefold())
-    test_texts = set(test.article.str.casefold())
-    assert train_texts.isdisjoint(validation_texts)
-    assert train_texts.isdisjoint(test_texts)
-    assert validation_texts.isdisjoint(test_texts)
-    for split in (train, validation, test):
-        assert set(split.label.unique()) == set(LABELS)
+def test_feature_extraction():
+    vectorizer = build_vectorizer(max_features=500)
+    samples = ["The economy showed signs of growth.", "Unemployment dropped this quarter."]
+    X = vectorizer.fit_transform(samples)
+    assert X.shape[0] == 2
+    assert X.shape[1] > 0
 
 
-def test_saved_model_is_welfake_logistic_regression():
+def test_model_artifacts():
     artifacts = load_artifacts()
-    assert list(artifacts["model"].classes_) == ["FAKE", "REAL"]
-    assert artifacts["metadata"]["dataset"] == "WELFake"
-    assert artifacts["metadata"]["model_name"] == "Logistic Regression"
-    assert artifacts["metadata"]["leakage_controls"]["vectorizer_fit_rows"] == artifacts["metadata"]["split_sizes"]["train"]
-    assert artifacts["metadata"]["leakage_controls"]["validation_and_test_used_for_fit"] is False
+    assert "model" in artifacts
+    assert "vectorizer" in artifacts
+    assert "metadata" in artifacts
+
+    model = artifacts["model"]
+    assert list(model.classes_) == CLASSES
+    assert hasattr(model, "predict_proba")
 
 
-@pytest.mark.parametrize("label", LABELS)
-def test_inference_on_real_heldout_article_per_class(label, heldout):
+def test_prediction_output():
     artifacts = load_artifacts()
-    sample = heldout["test"].loc[heldout["test"].label.eq(label)].iloc[0]
-    result = predict_article(sample.title, sample.text, artifacts)
-    assert result["label"] in LABELS
-    assert set(result["probabilities"]) == set(LABELS)
-    assert np.isclose(sum(result["probabilities"].values()), 1.0)
-    assert 0 <= result["fake_probability"] <= 1
-    assert 0 <= result["real_probability"] <= 1
-    assert result["model_name"] == "Logistic Regression"
-    assert result["explanation"]["available"]
+    claim = "The government plans to increase federal spending on education."
+    result = predict_claim(claim, artifacts)
+
+    assert result["prediction"] in CLASSES
+    assert 0.0 <= result["confidence"] <= 1.0
+    assert 0.0 <= result["fake_probability"] <= 1.0
+    assert 0.0 <= result["real_probability"] <= 1.0
+    assert np.isclose(result["fake_probability"] + result["real_probability"], 1.0)
+    assert "explanation" in result
 
 
-def test_missing_artifacts_are_not_replaced_by_old_liar_files(tmp_path):
-    with pytest.raises(FileNotFoundError, match="WELFake"):
-        load_artifacts(tmp_path)
+def test_explain_prediction():
+    artifacts = load_artifacts()
+    claim = "Wisconsin layoffs doubled this year according to state reports."
+    explanation = explain_prediction(claim, artifacts["vectorizer"], artifacts["model"])
+
+    assert "words" in explanation
+    assert isinstance(explanation["words"], list)
+
+
+def test_short_claim_error():
+    artifacts = load_artifacts()
+    with pytest.raises(ValueError):
+        predict_claim("Hello", artifacts)
